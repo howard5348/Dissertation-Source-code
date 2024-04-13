@@ -1,0 +1,835 @@
+#include "USBSerial.h"
+#include "mbed.h"
+#include <stdint.h>
+
+#define Te 450
+#define print(text) port.printf("%s", text)
+
+USBSerial port;
+DigitalOut Dout(D57);
+uint16_t output;
+int output_mode;
+
+void setCmdTypeStep(void);
+bool setAddrTypeStep(void);
+bool generalCmdStep(void);
+bool setAddrBitStep(int min, int max, int return_int);
+bool configCmdStep(void);
+bool queryCmdStep(void);
+bool setSpecialCmdStep(void);
+bool setDeviceSpecificCmdStep(void);
+bool setDAPCLevel(void);
+void Logic(bool signal);
+void forwardFrame(uint16_t input);
+bool setCmdBitStep(int min, int max, int return_int);
+int scanInt();
+
+bool setDAPCLevel() {
+  bool need_print = true;
+  while (1) {
+    if (need_print) {
+      print("Enter Direct Arc Power Level:\r\n"
+            "Enter from 1 to 254 as minimum and maximum respectively,\r\n"
+            "0 to turn off, 255 to stop fading\r\n"
+            "Any out of bound input would be rounded to either 1 or 254.\r\n"
+            "Except for 256, enter 256 to return to last step.\r\n");
+    }
+    need_print = false;
+    int val = scanInt();
+    if (val > 255)
+      val = 254;
+    else if (val < 0)
+      val = 1;
+    else if (val == 256)
+      return false;
+    output = output | val;
+    return true;
+  }
+}
+// utility functions
+char scanChar() {
+  char buffer[2] = {};
+  port.scanf("%1s", buffer);
+  port.printf("Value entered was:%s\r\n", buffer);
+  if (buffer[0] >= 'a')
+    return buffer[0] - 32; // 'A' - 'a' = 32
+  return buffer[0];
+}
+
+int scanInt() {
+  int buffer;
+  port.scanf("%d", &buffer);
+  port.printf("Value entered was: %d\r\n", buffer);
+  return buffer;
+}
+
+void setCmdTypeStep() { // return number of subsequent forward frame to be
+                        // called
+  bool need_print = true;
+  while (1) {
+    if (need_print) {
+      print("Choose your type of command\r\n"
+            "- D for direct arc power control\r\n"
+            "- G for general commands\r\n"
+            "- C for configuration commands\r\n"
+            "- Q for query commands\r\n"
+            "- S for special commands\r\n"
+            "- X for device specific commands\r\n");
+    }
+    need_print = true;
+    switch (scanChar()) {
+    case 'D':
+      output_mode = 0;
+      while (1) {
+        if (!setAddrTypeStep()) // setAddr back
+          goto breakSwitch;
+        output = output << 9;
+        if (!setDAPCLevel()) // generalCmd back -> setAddr
+        {
+          output = output >> 9;
+        } else {
+          return;
+        }
+      }
+    case 'G': // G_CMD
+      output_mode = 0;
+      while (1) {
+        if (!setAddrTypeStep()) // setAddr back
+          goto breakSwitch;
+        if (generalCmdStep()) // generalCmd back -> setAddr
+          return;
+      }
+    case 'C':          // configCommand
+      output_mode = 1; // send twice in 100ms
+      while (1) {
+        if (!setAddrTypeStep()) // setAddr back
+          goto breakSwitch;
+        if (configCmdStep())
+          return;
+      }
+    case 'Q':
+      output_mode = 2; // Special timing for query cmd as have to wait for
+                       // backward frame
+      while (1) {
+        if (!setAddrTypeStep()) // setAddr back
+          goto breakSwitch;
+        if (queryCmdStep()) // generalCmd back -> setAddr
+          return;
+      }
+
+    case 'S':
+      output_mode = 0;
+      while (1) {
+        if (!setSpecialCmdStep())
+          goto breakSwitch;
+        return;
+      }
+    case 'X':
+      while (1) {
+        if (!setDeviceSpecificCmdStep())
+          goto breakSwitch;
+        return;
+      default:
+        need_print = false;
+        port.printf("Invalid input, please try again\r\n");
+        goto breakSwitch;
+      };
+    }
+  breakSwitch:;
+  }
+}
+
+bool setAddrTypeStep() {
+  bool need_print = true;
+  while (1) {
+    if (need_print) {
+      print("Select address type\r\n"
+            "- I for individual\r\n"
+            "- G for group\r\n"
+            "- B for broadcast\r\n"
+            "- R to return\r\n");
+    }
+    need_print = true;
+    bool success;
+    switch (scanChar()) {
+    case 'I':
+      if (setAddrBitStep(0, 63, 64)) {
+        return true;
+      } else {
+        output = output >> 4;
+        need_print = true;
+        break;
+      }
+      break;
+    case 'G':
+      output = 0b100 << 4;
+
+      if (setAddrBitStep(0, 15, 16)) {
+        return true;
+      } else {
+        output = output >> 6;
+        need_print = true;
+        break;
+      }
+    case 'B':
+      output = 127;
+      return true;
+      break;
+    case 'R':
+      return false;
+    default:
+      need_print = false;
+      port.printf("Invalid input, please try again\r\n");
+    };
+  }
+}
+
+bool setAddrBitStep(int min, int max, int return_int = 64) {
+
+  bool need_print = true;
+  // TODO: more detail guidance
+  while (need_print) {
+    port.printf("Enter address %d~%d\r\n", min, max);
+    port.printf("Or enter %d to return.\r\n", return_int);
+    need_print = false;
+  }
+
+  while (1) {
+    int val = scanInt();
+
+    if (val == return_int) // cancel
+      return false;
+
+    if (val <= max && val >= min) {
+      output = output | val;
+      return true;
+    }
+
+    port.printf("Invalid input. Please input address within %d~%d\r\n", min,
+                max);
+  }
+}
+
+bool setCmdBitStep(int min, int max, int returnInt = 64) {
+  bool need_print = true;
+  while (need_print) {
+    port.printf("Enter number from %d~%d\r\n", min, max);
+    port.printf("Or enter %d to return\r\n", returnInt);
+    need_print = false;
+  }
+  int val;
+  while (1) {
+    val = scanInt();
+    if (val == returnInt)
+      return false;
+    if (val <= min && val >= max)
+      output = output | val;
+    return true;
+    port.printf("Invalid input, please try again.\r\n");
+  }
+}
+
+bool generalCmdStep() {
+  bool need_print = true;
+  while (1) {
+    if (need_print) {
+      print("Select command\r\n"
+            "0 - OFF\r\n"
+            "1 - UP\r\n"
+            "2 - DOWN\r\n"
+            "3 - STEP UP\r\n"
+            "4 - STEP DOWN\r\n"
+            "5 - RECALL MAX LEVEL\r\n"
+            "6 - RECALL MIN LEVEL\r\n"
+            "7 - STEP DOWN AND OFF\r\n"
+            "8 - ON AND STEP UP\r\n"
+            "9 - ENABLE DAPC SEQUENCE\r\n"
+            "10 - GO TO SCENE\r\n"
+            "11 - RETURN\r\n");
+    }
+    int val = scanInt();
+    if (val == 11)
+      return false;
+    output = output << 1 | 1;
+    if (val <= 9 && val >= 0) {
+      output = output << 8 | val;
+      return true;
+    }
+    if (val == 10) {
+      output = output << 4 | 1;
+      output = output << 4;
+      while (1) {
+        if (setCmdBitStep(0, 15, 16)) {
+          return true;
+        } else {
+          output = output >> 9;
+          break;
+        }
+      }
+      continue;
+    }
+    print("Invalid input, enter number from 1-11\r\n");
+  }
+}
+
+bool queryCmdStep() {
+  bool need_print = true;
+  int page_count = 0;
+  while (1) {
+    if (need_print) {
+      need_print = false;
+      switch (page_count) {
+      case 0:
+        port.printf("Page number:%d\r\n"
+                    "Select command\r\n"
+                    "0 - QUERY STATUS\r\n"
+                    "1 - QUERY CONTROL GEAR\r\n"
+                    "2 - QUERY LAMP FAILURE\r\n"
+                    "3 - QUERY LAMP POWER ON\r\n"
+                    "4 - QUERY LIMIT ERROR\r\n"
+                    "5 - QUERY RESET STATE\r\n"
+                    "6 - QUERY MISSING SHORT ADDRESS\r\n"
+                    "7 - QUERY VERSION NUMBER\r\n"
+                    "8 - QUERY CONTENT DTR\r\n"
+                    "9 - QUERY DEVICE TYPE\r\n"
+                    "10 - NEXT PAGE\r\n"
+                    "11 - LAST PAGE\r\n"
+                    "12 - RETURN\r\n",
+                    page_count);
+        break;
+      case 1:
+        port.printf("Page number:%d\r\n"
+                    "Select command\r\n"
+                    "0 - QUERY PHYSICAL MINIMUM LEVEL\r\n"
+                    "1 - QUERY POWER FAILURE\r\n"
+                    "2 - QUERY CONTENT DTR1\r\n"
+                    "3 - QUERY CONTENT DTR2\r\n"
+                    "4 - QUERY ACTUAL LEVEL\r\n"
+                    "5 - QUERY MAX LEVEL\r\n"
+                    "6 - QUERY MIN LEVEL\r\n"
+                    "7 - QUERY POWER ON LEVEL\r\n"
+                    "8 - QUERY SYSTEM FAILURE LEVEL\r\n"
+                    "9 - QUERY FADE TIME/FADE RATE\r\n"
+                    "10 - NEXT PAGE\r\n"
+                    "11 - LAST PAGE\r\n"
+                    "12 - RETURN\r\n",
+                    page_count);
+        break;
+      case 2:
+        port.printf("Page number:%d\r\n"
+                    "Select command\r\n"
+                    "0 - QUERY SCENE LEVEL (SCENES 0 - 15)\r\n"
+                    "1 - QUERY GROUPS 0 - 7\r\n"
+                    "2 - QUERY GROUPS 8 - 15\r\n"
+                    "3 - QUERY RANDOM ADDRESS (HIGH)\r\n"
+                    "4 - QUERY RANDOM ADDRESS (MID)\r\n"
+                    "5 - QUERY RANDOM ADDRESS (LOW)\r\n"
+                    "6 - READ MEMORY LOCATION\r\n"
+                    "7 - QUERY EXTENDED VERSION NUMBER\r\n"
+                    "10 - NEXT PAGE\r\n"
+                    "11 - LAST PAGE\r\n"
+                    "12 - RETURN\r\n",
+                    page_count);
+        break;
+      };
+    }
+    int val = scanInt();
+    if (page_count > 0 && val == 11) { // last page kayword
+      page_count -= 1;
+      need_print = true;
+    } else if (page_count < 2 && val == 10) { // next page keyword
+      page_count += 1;
+      need_print = true;
+    } else if (page_count == 2 && val == 10 || page_count == 0 && val == 11) {
+      print("Invalid input, please try again.\r\n");
+      need_print = true;
+    } else {
+      if ((page_count * 10 + val) <= 27) {
+        int cmd = page_count * 10 + val;
+        if (val == 12) // return keyword
+          return false;
+        output = output << 2 | 0b11;
+        switch (cmd) {
+        case 0:
+          output = output << 7 | 0b10000;
+          return true;
+        case 1:
+          output = output << 7 | 0b10001;
+          return true;
+        case 2:
+          output = output << 7 | 0b10010;
+          return true;
+        case 3:
+          output = output << 7 | 0b10011; // pw on
+          return true;
+        case 4:
+          output = output << 7 | 0b10100; // lim error
+          return true;
+        case 5:
+          output = output << 7 | 0b10101; // reset state
+          return true;
+        case 6:
+          output = output << 7 | 0b10110; // missing short address
+          return true;
+        case 7:
+          output = output << 7 | 0b10111; // version num
+          return true;
+        case 8:
+          output = output << 7 | 0b11000; // content DTR
+          return true;
+        case 9:
+          output = output << 7 | 0b11001; // device type
+          return true;
+        case 10:
+          output = output << 7 | 0b11010; // phy min level
+          return true;
+        case 11:
+          output = output << 7 | 0b11011; // pw failure
+          return true;
+        case 12:
+          output = output << 7 | 0b11100; // content DTR 1
+          return true;
+        case 13:
+          output = output << 7 | 0b11101; // content DTR 2
+          return true;
+        case 14:
+          output = output << 7 | 0b100000; // actual level
+          return true;
+        case 15:
+          output = output << 7 | 0b100001; // max level
+          return true;
+        case 16:
+          output = output << 7 | 0b100010; // min level
+          return true;
+        case 17:
+          output = output << 7 | 0b100011; // power on level
+          return true;
+        case 18:
+          output = output << 7 | 0b100100; // system failure level
+          return true;
+        case 19:
+          output = output << 7 | 0b100101; // fade time/fade rate
+          return true;
+        case 20: // scene level
+          output = output << 3 | 0b011;
+          output = output << 4;
+          while (1) {
+            if (setCmdBitStep(0, 15, 16)) {
+              return true;
+            } else {
+              output = output >> 4;
+              need_print = true;
+              break;
+            }
+          }
+        case 21: // groups 0 - 7
+          output = output << 7 | 0b1000000;
+          return true;
+        case 22:
+          output = output << 7 | 0b1000001;
+          return true;
+        case 23:
+          output = output << 7 | 0b1000010;
+          return true;
+        case 24:
+          output = output << 7 | 0b1000011;
+          return true;
+        case 25:
+          output = output << 7 | 0b1000100;
+          return true;
+        case 26:
+          output = output << 7 | 0b1000101;
+          return true;
+        case 27:
+          output = output << 7 | 0b1111111;
+          return true;
+        };
+      } else {
+        port.printf("Invalid input, enter number from %d~%d,\r\naccording to "
+                    "the page shown",
+                    0, 10);
+        need_print = true;
+      }
+    }
+  }
+  return true;
+}
+
+bool configCmdStep() {
+  bool need_print = true;
+  int val;
+  while (1) {
+    if (need_print) {
+      print("Select command\r\n"
+            "0 - RESET\r\n"
+            "1 - STORE ACTUAL LEVEL IN THE DTR\r\n"
+            "2 - STORE THE DTR AS MAX LEVEL\r\n"
+            "3 - STORE THE DTR AS MIN LEVEL"
+            "4 - STORE THE DTR AS SYSTEM FAILURE LEVEL\r\n"
+            "5 - STORE THE DTR AS POWER ON LEVEL\r\n"
+            "6 - STORE THE DTR AS FADE TIME\r\n"
+            "7 - STORE THE DTR AS FADE RATE\r\n"
+            "8 - STORE THE DTR AS SCENE\r\n"
+            "9 - RETURN\r\n");
+    }
+    need_print = true;
+    return true;
+    while (1) {
+      val = scanInt();
+      if (val >= 0 && val <= 8) {
+        output = output << 4 | 0b1001 << 5;
+      }
+      switch (val) {
+      case 0:; // YAAA AAA1 0010 0000
+        return true;
+      case 1:
+        output = output | 1; // YAAA AAA1 0010 0001
+        return true;
+      case 2:
+        output = output | 10; // YAAA AAA1 0010 1010
+        return true;
+      case 3:
+        output = output | 11;
+        return true;
+      case 4:
+        output = output | 12;
+        return true;
+      case 5:
+        output = output | 13;
+        return true;
+      case 6:
+        output = output | 14;
+        return true;
+      case 7:
+        output = output | 15;
+        return true;
+      case 8:
+        output = output << 2 | 1 << 2;
+        port.printf("Enter scene %d~%d\r\n"
+                    "Or %d to return\r\n",
+                    0, 15, 16);
+        while (1) {
+          int scene = scanInt();
+          if (scene == 16)
+            return false;
+          if (scene >= 0 && scene <= 15) {
+            output = output << 4 | scene;
+            return true;
+          }
+        }
+      };
+    }
+  }
+}
+
+bool setDeviceSpecificCmdStep() {
+  bool need_print = true;
+  int val;
+  while (1) {
+    if (need_print) {
+      port.printf("Select command:\r\n"
+                  "0 - DATA TRANSFER REGISTER 1\r\n"
+                  "1 - DATA TRANSFER REGISTER 2\r\n"
+                  "2 - WRITE MEMORY LOCATION\r\n"
+                  "3 - RETURN\r\n");
+      need_print = false;
+    }
+
+    switch (val) {
+    case 0:
+      output = output | 0b11000011 << 8;
+      if (setCmdBitStep(0, 255, 256))
+        return true;
+
+      output = 0;
+      return false;
+
+    case 1:
+      output = output | 0b11000101 << 8;
+      if (setCmdBitStep(0, 255, 256))
+        return true;
+
+      output = 0;
+      return false;
+
+    case 2:
+      output = output | 0b11000111 << 8;
+      if (setCmdBitStep(0, 255, 256))
+        return true;
+
+      output = 0;
+      return false;
+    case 3:
+      return false;
+
+    default:
+      print("Invalid input. Please try again.\r\n");
+    }
+  }
+}
+
+bool setDeviceStep() {
+  bool need_print = true;
+  int val;
+  while (1) {
+    if (need_print) {
+      port.printf("Select device type:\r\n"
+                  "0 - Fluorescent lamps\r\n"
+                  "1 - Self-contained emergency lighting\r\n"
+                  "2 - Discharge lamps (excluding fluorescent lamps)\r\n"
+                  "3 - Low voltage halogen lamps\r\n"
+                  "4 - Supply Voltage controller for incandescent lamps\r\n"
+                  "5 - Conversion from digital into D.C. voltage\r\n"
+                  "6 - LED modules\r\n"
+                  "7 - Switching function\r\n"
+                  "8 - Colour control\r\n"
+                  "9 - Sequencer\r\n"
+                  "10 - Optical control\r\n"
+                  "11 - RETURN\r\n");
+      need_print = false;
+    }
+    val = scanInt();
+    if (val == 11)
+      return false;
+    if (val >= 0 && val < 11) {
+      output = output | 0b11000001 << 8 | val;
+      forwardFrame(output);
+      if (setDeviceSpecificCmdStep())
+        return true;
+      need_print = true;
+    } else {
+      print("Invalid input. Please try again.\r\n");
+    }
+  }
+}
+
+bool setSpecialCmdStep() {
+  bool need_print = true;
+  int page_number = 0;
+  while (1) {
+    if (need_print) {
+      switch (page_number) {
+      case 0:
+        port.printf("Page number:%d\r\n"
+                    "Select command\r\n"
+                    "0 - TERMINATE\r\n"
+                    "1 - DATA TRANSFER REGISTER\r\n"
+                    "2 - INITIALISE\r\n"
+                    "3 - RANDOMISE\r\n"
+                    "4 - COMPARE\r\n"
+                    "5 - WITHDRAW\r\n"
+                    "6 - SEARCH ADDRESS (HIGH)\r\n"
+                    "7 - SEARCH ADDRESS (MID)\r\n"
+                    "8 - SEARCH ADDRESS (LOW)\r\n"
+                    "9 - NEXT PAGE\r\n"
+                    "10 - RETURN\r\n",
+                    page_number);
+        need_print = false;
+        break;
+      case 1:
+        port.printf("Page number:%d\r\n"
+                    "Select command\r\n"
+                    "11 - PROGRAM SHORT ADDRESS\r\n"
+                    "12 - VERIFY SHORT ADDRESS\r\n"
+                    "13 - QUERY SHORT ADDRESS\r\n"
+                    "14 - PHYSICAL SELECTION\r\n"
+                    "9 - LAST PAGE\r\n"
+                    "10 - RETURN\r\n",
+                    page_number);
+        need_print = false;
+        break;
+      };
+    }
+    int val = scanInt();
+    if (val == 10)
+      return false;
+    if (val == 9 && page_number == 0)
+      page_number += 1;
+    if (val == 9 && page_number == 1)
+      page_number -= 1;
+    int num = ((page_number * 10) + val);
+    switch (num) {
+    case 0:
+      output = output | 0b10100001;
+      output = output << 8;
+      return true;
+    case 1:
+      output = output | 0b10100011;
+      port.printf("Enter the 8-bit value to be stored (In decimal)\r\n");
+      output = output << 8;
+      while (1) {
+        if (setCmdBitStep(0, 255, 256)) {
+          return true;
+        } else {
+          output = 0;
+          break;
+        };
+      }
+      need_print = true;
+      break;
+    case 3:
+      output = output | 0b10100111 << 8;
+      return true;
+    case 4:
+      output = output | 0b10101001 << 8;
+      return true;
+    case 5:
+      output = output | 0b10101011 << 8;
+      return true;
+    case 6:
+      output = output | 0b10110001 << 8;
+      if (setAddrBitStep(0, 255, 256))
+        return true;
+      output = 0;
+      return false;
+    case 7:
+      output = output | 0b10110011 << 8;
+      if (setAddrBitStep(0, 255, 256))
+        return true;
+      output = 0;
+      return false;
+    case 8: // search address low
+      output = output | 0b10110101 << 8;
+      if (setAddrBitStep(0, 255, 256))
+        return true;
+      output = 0;
+      return false;
+    case 10:
+      output = output | 0b10110111 << 7;
+      if (setAddrBitStep(0, 63, 64)) {
+        output = output << 1 | 1;
+        return true;
+      }
+      output = 0;
+      return false;
+    case 11:
+      output = output | 0b10111001 << 7;
+      if (setAddrBitStep(0, 63, 64)) {
+        output = output << 1 | 1;
+        return true;
+      case 12:
+        output = output | 0b10111011 << 8;
+        return true;
+      case 13:
+        output = output | 0b10111101 << 8;
+        return true;
+      case 2:
+        bool print_case = true;
+        output = output | 0b10100101;
+        if (print_case) {
+          print("Select target:\r\n"
+                "0 - All control gear shall react\r\n"
+                "1 - Select control gear at specific address\r\n"
+                "2 - All control gear without set address\r\n"
+                "3 - RETURN\r\n");
+        }
+        int target;
+        while (1) {
+          target = scanInt();
+          if (target == 3) {
+            output = 0;
+            break;
+          }
+          if (target == 0) {
+            output = output << 8;
+            output_mode = 1; // send twice in 100ms
+            return true;
+          } else if (target == 1) {
+
+            output = output << 7;
+            while (1) {
+              if (setCmdBitStep(0, 63, 64)) {
+                output = output << 1 | 1;
+                output_mode = 1;
+                return true;
+              } else {
+                output = output >> 7;
+                break;
+              }
+            }
+            print_case = true;
+            break;
+          } else if (target == 2) {
+            output = output << 8 | 0b11111111;
+            output_mode = 1;
+            return true;
+          }
+          print("Invalid input. Please try again.\r\n");
+        }
+        break;
+      };
+    };
+    return true;
+  }
+}
+
+void forwardFrame(uint16_t input) {
+  // ! for invert logic
+  int mask = 0x8000; // 0x8000 = 0b1000 0000 0000 0000
+  int temp;
+  Logic(!1);
+  for (int k = 0; k < 16; k++) {
+    temp = (input & mask) >> (15 - k);
+    mask = mask >> 1;
+    Logic(!temp);
+  }
+  Dout = !1;
+  wait_us(Te * 4);
+}
+
+// output_mode 0 = nth special
+// output_mode 1 = send twice in 100 ms
+// output_mode 2 = special timing as query command have to cater for backward
+// frame
+
+void Logic(bool signal) {
+  if (signal == 1) {
+    Dout = 0;
+    wait_us(Te);
+    Dout = 1;
+    wait_us(Te);
+  }
+  if (signal == 0) {
+    Dout = 1;
+    wait_us(Te);
+    Dout = 0;
+    wait_us(Te);
+  }
+}
+
+int main(void) {
+  // Sender module
+  while (1) {
+    //   output = 0b1111000011110000;
+    //   forwardFrame(output);
+    //   wait_us(2000);
+    output_mode = 0;
+    output = 0;
+    setCmdTypeStep();
+    // Output command ...
+    print("Ended sucessfully\r\n"
+          "The output is:\r\n");
+    for (int k = 0; k < 16; k++) {
+      port.printf("%d_%d\r\n", k + 1, ((output & (1 << (15 - k))) >> (15 - k)));
+    }
+    print("\r\n");
+    port.printf("%d\r\n", output);
+    if (output_mode == 0) {
+      // forwardFrame(output);
+      // wait_us(Te * 24);
+
+      forwardFrame(output);
+      ThisThread::sleep_for(10ms);
+
+    } else if (output_mode == 1) {
+      for (int k = 0; k < 2; k++) {
+        forwardFrame(output);
+        ThisThread::sleep_for(15ms);
+      }
+    } else if (output_mode == 2) {
+      forwardFrame(output);
+      ThisThread::sleep_for(10ms);
+    };
+    port.printf("Successfully sent\n\r\n");
+  }
+}
