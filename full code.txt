@@ -17,7 +17,8 @@ bool setAddrBitStep(int min, int max, int return_int);
 bool configCmdStep(void);
 bool queryCmdStep(void);
 bool setSpecialCmdStep(void);
-bool setDeviceSpecificCmdStep(void);
+bool setDeviceStep(void);
+bool setDeviceSpecificCmdStep(int device);
 bool setDAPCLevel(void);
 void Logic(bool signal);
 void forwardFrame(uint16_t input);
@@ -126,7 +127,7 @@ void setCmdTypeStep() { // return number of subsequent forward frame to be
       }
     case 'X':
       while (1) {
-        if (!setDeviceSpecificCmdStep())
+        if (!setDeviceStep()) // setAddr back
           goto breakSwitch;
         return;
       default:
@@ -522,49 +523,201 @@ bool configCmdStep() {
   }
 }
 
-bool setDeviceSpecificCmdStep() {
+bool setDeviceSpecificCmdStep(int device) {
   bool need_print = true;
   int val;
   while (1) {
-    if (need_print) {
-      port.printf("Select command:\r\n"
-                  "0 - DATA TRANSFER REGISTER 1\r\n"
-                  "1 - DATA TRANSFER REGISTER 2\r\n"
-                  "2 - WRITE MEMORY LOCATION\r\n"
-                  "3 - RETURN\r\n");
-      need_print = false;
-    }
 
-    switch (val) {
-    case 0:
-      output = output | 0b11000011 << 8;
-      if (setCmdBitStep(0, 255, 256))
-        return true;
-
-      output = 0;
-      return false;
-
-    case 1:
-      output = output | 0b11000101 << 8;
-      if (setCmdBitStep(0, 255, 256))
-        return true;
-
-      output = 0;
-      return false;
-
-    case 2:
-      output = output | 0b11000111 << 8;
-      if (setCmdBitStep(0, 255, 256))
-        return true;
-
-      output = 0;
-      return false;
-    case 3:
-      return false;
-
+    switch (device) {
+    case 0: // FL
+      while (1) {
+        if (need_print) {
+          port.printf("Select command:\r\n"
+                      "0 - QUERY EXTENDED VERSION NUMBER\r\n"
+                      "1 - ENABLE DEVICE TYPE 0\r\n"
+                      "2 - RETURN\r\n");
+        }
+        val = scanInt();
+        need_print = false;
+        if (val == 2) {
+          need_print = true;
+          return false;
+        }
+        if (!(val == 0 || val == 1)) {
+          if (!setAddrTypeStep()) { // Set address bit
+            output = 0;
+            need_print = true;
+            continue;
+          }
+          output = output << 1 | 1 << 8;
+        }
+        switch (val) {
+        case 0:
+          output = output | 0b11111111;
+          output_mode = 2;
+          return true;
+        case 1:
+          output = 0b1100000100000000;
+          output_mode = 0;
+          return true;
+        case 2:
+          return false;
+        default:
+          print("Invalid input. Please try again.\r\n");
+        };
+      }
+    case 6: // LED
+      while (1) {
+        if (need_print) {
+          port.printf("Select Command:\r\n"
+                      "0 - REFERENCE SYSTEM POWER\r\n"
+                      "1 - ENABLE CURRENT PROTECTOR\r\n"
+                      "2 - DISABLE CURRENT PROTECTOR\r\n"
+                      "3 - SELECT DIMMING CURVE\r\n"
+                      "4 - STORE DTR AS FAST FADE TIME\r\n"
+                      "5 - QUERY GEAR TYPE\r\n"
+                      "6 - QUERY DIMMING CURVE\r\n"
+                      "7 - QUERY POSSIBLE OPERATING MODES\r\n"
+                      "8 - QUERY FEATURES\r\n"
+                      "9 - QUERY FAILURE STATUS\r\n"
+                      "10 - QUERY SHORT CIRCUIT\r\n"
+                      "11 - QUERY OPEN CIRCUIT\r\n"
+                      "12 - QUERY LOAD DECREASE\r\n"
+                      "13 - QUERY LOAD INCREASE\r\n"
+                      "14 - QUERY CURRENT PROTECTOR ACTIVE\r\n"
+                      "15 - QUERY THERMAL SHUT DOWN\r\n"
+                      "16 - QUERY THERMAL OVERLOAD\r\n"
+                      "17 - QUERY REFERENCE RUNNING\r\n"
+                      "18 - QUERY REFERENCE MEASUREMENT FAILED\r\n"
+                      "19 - QUERY CURRENT PROTECTOR ENABLED\r\n"
+                      "20 - QUERY OPERATING MODE\r\n"
+                      "21 - QUERY FAST FADE TIME\r\n"
+                      "22 - QUERY MIN FAST FADE TIME\r\n"
+                      "23 - QUERY EXTENDED VERSION NUMBER\r\n"
+                      "24 - ENABLE DEVICE TYPE 6 \r\n"
+                      "25 - RETURN");
+        }
+        need_print = false;
+        val = scanInt();
+        if (val == 25)
+          return false;
+        if (val != 24) {
+          if (!setAddrTypeStep()) { // Set address bit
+            output = 0;
+            need_print = true;
+            continue;
+          }
+          output = output << 1 |
+                   1 << 8; // The remaining 8bits are reserved for cmd bit
+        }
+        switch (val) {
+        case 0:
+          output = output | 0b11100000;
+          output_mode = 1;
+          return true;
+        case 1:
+          output = output | 0b11100001;
+          output_mode = 1;
+          return true;
+        case 2:
+          output = output | 0b11100010;
+          output_mode = 1;
+          return true;
+        case 3:
+          output = output | 0b11100011;
+          output_mode = 1;
+          return true;
+        case 4:
+          output = output | 0b11100100;
+          output_mode = 1;
+          return true;
+        case 5:
+          output = output | 0b11101101;
+          output_mode = 2;
+          return true;
+        case 6:
+          output = output | 0b11101110;
+          output_mode = 2;
+          return true;
+        case 7:
+          output = output | 0b11101111;
+          output_mode = 2;
+          return true;
+        case 8:
+          output = output | 0b11110000;
+          output_mode = 2;
+          return true;
+        case 9:
+          output = output | 0b11110001;
+          output_mode = 2;
+          return true;
+        case 10:
+          output = output | 0b11110010;
+          output_mode = 2;
+          return true;
+        case 11:
+          output = output | 0b11110011;
+          output_mode = 2;
+          return true;
+        case 12:
+          output = output | 0b11110100;
+          output_mode = 2;
+          return true;
+        case 13:
+          output = output | 0b11110101;
+          output_mode = 2;
+          return true;
+        case 14:
+          output = output | 0b11110110;
+          output_mode = 2;
+          return true;
+        case 15:
+          output = output | 0b11110111;
+          output_mode = 2;
+          return true;
+        case 16:
+          output = output | 0b11111000;
+          output_mode = 2;
+          return true;
+        case 17:
+          output = output | 0b11111001;
+          output_mode = 2;
+          return true;
+        case 18:
+          output = output | 0b11111010;
+          output_mode = 2;
+          return true;
+        case 19:
+          output = output | 0b11111011;
+          output_mode = 2;
+          return true;
+        case 20:
+          output = output | 0b11111100;
+          output_mode = 2;
+          return true;
+        case 21:
+          output = output | 0b11111101;
+          output_mode = 2;
+          return true;
+        case 22:
+          output = output | 0b11111110;
+          output_mode = 2;
+          return true;
+        case 23:
+          output = output | 0b11111111;
+          output_mode = 2;
+          return true;
+        case 24:
+          output = 0b1100000100000110;
+          output_mode = 0;
+        default:
+          print("Invalid input, please enter again\r\n");
+        }
+      }
     default:
-      print("Invalid input. Please try again.\r\n");
-    }
+      print("Unsupported device type");
+      return false;
+    };
   }
 }
 
@@ -594,7 +747,7 @@ bool setDeviceStep() {
     if (val >= 0 && val < 11) {
       output = output | 0b11000001 << 8 | val;
       forwardFrame(output);
-      if (setDeviceSpecificCmdStep())
+      if (setDeviceSpecificCmdStep(val))
         return true;
       need_print = true;
     } else {
